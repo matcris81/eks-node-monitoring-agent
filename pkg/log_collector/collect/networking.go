@@ -31,6 +31,7 @@ func (m Networking) Collect(acc *Accessor) error {
 		ipInfo(acc),
 		apiServerConnectivity(acc),
 		systemdNetworkConfig(acc),
+		systemdNetworkFullConfig(acc),
 		networkPolicyEbpfInfo(acc),
 	)
 }
@@ -134,6 +135,59 @@ func systemdNetworkConfig(acc *Accessor) error {
 		merr = errors.Join(merr,
 			acc.CommandOutput([]string{"systemd-analyze", "cat-config", iface.LinkFile},
 				outputPath, CommandOptionsIgnoreFailure))
+	}
+	return merr
+}
+
+// networkdConfigDirs are the directories systemd-networkd reads configuration
+// from. see: https://www.freedesktop.org/software/systemd/man/latest/systemd.network.html
+var networkdConfigDirs = []string{
+	"/usr/lib/systemd/network",
+	"/etc/systemd/network",
+	"/run/systemd/network",
+	"/usr/local/lib/systemd/network",
+}
+
+// systemdNetworkFullConfig dumps every networkd unit file (.network, .link,
+// .netdev, with drop-ins resolved) from all config directories, not just the
+// link files bound to currently-up interfaces: the unit that explains a
+// broken interface is often one that networkctl does not associate with any
+// live interface.
+func systemdNetworkFullConfig(acc *Accessor) error {
+	units, err := networkdUnitFiles(acc)
+	if err != nil {
+		return err
+	}
+	return dumpNetworkdUnits(acc, units)
+}
+
+// networkdUnitFiles lists the networkd unit files present under the config
+// directories as host paths (relative to Root).
+func networkdUnitFiles(acc *Accessor) ([]string, error) {
+	var units []string
+	for _, dir := range networkdConfigDirs {
+		matches, err := filepath.Glob(filepath.Join(acc.cfg.Root, dir, "*.*"))
+		if err != nil {
+			return nil, err
+		}
+		for _, match := range matches {
+			if st, err := os.Stat(match); err != nil || st.IsDir() {
+				continue
+			}
+			// commands are executed under Root, so pass the host path
+			units = append(units, filepath.Join(dir, filepath.Base(match)))
+		}
+	}
+	return units, nil
+}
+
+func dumpNetworkdUnits(acc *Accessor, units []string) error {
+	var merr error
+	for _, unit := range units {
+		outputPath := filepath.Join("networking/systemd-network", filepath.Base(unit))
+		// per-unit best-effort: one unreadable unit must not fail the capture
+		merr = errors.Join(merr,
+			acc.CommandOutput([]string{"systemd-analyze", "cat-config", unit}, outputPath, CommandOptionsIgnoreFailure))
 	}
 	return merr
 }
